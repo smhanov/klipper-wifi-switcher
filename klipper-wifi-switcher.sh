@@ -3,6 +3,10 @@
 
 # line="@reboot /path/to/command"
 
+function wlog() {
+    echo $* | tee -a $logfile
+}
+
 if [[ $* == *--run* ]]; then
     # Locate config folder
     if [ -d "$HOME/printer_data/config" ]; then
@@ -13,25 +17,35 @@ if [[ $* == *--run* ]]; then
         echo "Could not find your klipper config folder"
     fi
 
-    MyFile="$folder/wifi.txt"
+    # Locate log folder
+    if [ -d "$HOME/printer_data/logs" ]; then
+        logfile="$HOME/printer_data/logs/wifi.log"
+    else 
+        echo "Could not find your klipper log folder"
+        logfile="/tmp/wifi.log"
+    fi
 
-    if [ -f $MyFile ]; then 
-        echo "Reading $MyFile"
+    wlog ""
+    wlog "Klipper Wifi Switcher started at $(date)"
+
+    WifiTxt="$folder/wifi.txt"
+
+    if [ -f $WifiTxt ]; then 
+        wlog "Reading $WifiTxt"
 
         # read each line of file
         while IFS= read -r line || [ -n "$line" ]; do
-        printf 'hello %s' "$line"
-        eval "arr=($line)"
-        echo nmcli dev wifi connect "${arr[0]}" password "${arr[1]}"
-        if nmcli dev wifi connect "${arr[0]}" password "${arr[1]}"; then 
-            printf "Successfully connected to %s" "${arr[0]}"
-            break
-        else
-            printf "Could not connect to %s" "${arr[0]}"
-        fi   
-        done < "$MyFile"
+            eval "arr=($line)"
+            echo nmcli dev wifi connect "${arr[0]}" password "${arr[1]}"
+            if nmcli dev wifi connect "${arr[0]}" password "${arr[1]}" 2>&1 | tee -a $logfile; then 
+                wlog "Successfully connected to ${arr[0]}"
+                break
+            else
+                wlog "Could not connect to ${arr[0]}"
+            fi   
+        done < "$WifiTxt"
     else 
-        echo "$MyFile does not exist; skipping"
+        wlog "$WifiTxt does not exist; skipping"
     fi
 else 
     #Install by adding to crontab to be executed on reboot
