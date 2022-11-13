@@ -6,17 +6,22 @@
 # set further in the script.
 # -------------------------------------------------------------------------
 
-# Location of wifi.txt file
+# Location of wifi.txt file filled in later
 wifi_txt=""
 
-# Location of wifi.log file
+# Location of wifi.log file filled in later
 wifi_log=""
 
 # The method of configuring the network -- either "nmcli" or "wpa_cli"
+# filled in later
 network_method=""
 
 # Interface name to use.
 wlan0="wlan0"
+
+# As networks are added they are added to this array as string SSID<tab>ID
+# where ID is how they are referred to by wpa_cli or nmcli
+networks_added=()
 
 # Scan the system and set the global variables above.
 function scan_system() {
@@ -70,7 +75,8 @@ function my_wpa_cli() {
 
 function logexec() {
     wlog ">$*"
-    "$@"        
+    "$@"
+    return $?        
 }
 
 # Trim whitespace
@@ -118,6 +124,7 @@ function add_connection() {
         my_wpa_cli -i $wlan0 set_network $id psk '"'$password'"'
         my_wpa_cli -i $wlan0 set_network $id priority $priority
         my_wpa_cli -i $wlan0 enable_network $id 
+        networks_added+=("$SSID\t$id")
     else 
         if [ -z "$password" ]; then 
             logexec nmcli con add type wifi con-name "wifi-switcher-$SSID" ssid "$SSID" connection.autoconnect-priority $priority connection.autoconnect TRUE
@@ -127,15 +134,86 @@ function add_connection() {
     fi
 }
 
-# disconnect and reconnect wifi so we connect to the network in priority order.
-function rescan() {
-    if [ "$network_method" = "wpa_cli" ]; then 
-        my_wpa_cli -i $wlan0 disconnect
-        my_wpa_cli -i $wlan0 reconnect
-    else 
-        logexec nmcli device disconnect $wlan0
-        logexec nmcli device connect $wlan0
+#ensured all added networks are placed into networks_added
+function get_added_networks() {
+    if [ "$network_method" = "nmcli" ]; then
+        local arr 
+        readarray -t arr < <(nmcli -t -f NAME,UUID conn show)
+        echo "result of arr is" ${arr[1]/:/"    "}
+        for i in "${arr[@]}"; do 
+            if [[ "$i" = wifi-switcher-* ]]; then 
+                tmp=${i/wifi-switcher-/}
+                networks_added+=("${tmp/:/	}")
+            fi
+        done
     fi
+}
+
+# Retrieve the list of networks currently visible into array passed in.
+function scan_networks() {
+    local -n result=$1
+    if [ "$network_method" = "wpa_cli" ]; then
+        wpa_cli -i $wlan0 scan
+        readarray -t result < <(wpa_cli -i $wlan0 scan_results | cut -f5) 
+    else
+        readarray -t result < <(nmcli -t -f SSID dev wifi)
+    fi
+}
+
+function containsElement() {
+    local -n array=$1
+    if [[ " ${array[*]} " =~ " ${2} " ]]; then 
+        return 0
+    fi
+    return 1
+}
+
+# try to connect to the given SSID. It must be listed in
+# networks_added as "$SSID<tab>network manager id"
+function try_connect() {
+    local ssid=$1
+    for line in "${networks_added[@]}"; do 
+        if [[ "$line" = "$ssid"* ]]; then 
+            if [ "$network_method" = "wpa_cli" ]; then
+                echo "This should not happen"
+                # I think we would use my_wpa_cli -i $wlan0 select_network
+            else 
+                logexec nmcli conn up $(cut -f2 <<< ${line})
+                if [ $? -eq 0 ]; then
+                    return 0
+                fi
+            fi
+        fi
+    done
+    return 1
+}
+
+# After we have finished adding all of the network, go through them in order
+# listed in wifi.txt file. If that SSID can be seen, attempt to connect to it.
+function reconnect() {
+    if [ "$network_method" = "wpa_cli" ]; then
+        # we just need to do this
+        my_wpa_cli -i $wlan0 reassociate
+        return 
+    fi
+    
+    # scan the networks to see what exists
+    scan_networks visible 
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        eval "arr=($line)"
+        local ssid="${arr[0]}"
+        if containsElement visible "$ssid"; then  
+            wlog "$ssid is visible. Trying to connect..."
+            if try_connect "$ssid"; then 
+                wlog "Connected to ${ssid}"
+                break
+            fi
+            echo "Failed to connect to $ssid"
+        else 
+            wlog "$ssid is not visible."
+        fi
+    done < "$wifi_txt"
 }
 
 function on_computer_restart() {
@@ -151,12 +229,22 @@ function on_computer_restart() {
 
         # read each line of file
         while IFS= read -r line || [ -n "$line" ]; do
+            if [ -z "$line" ]; then 
+                echo "Skip blank line"
+                continue
+            fi
             eval "arr=($line)"
             add_connection "${arr[0]}" "${arr[1]}" $priority
             priority=$((priority-1))
         done < "$wifi_txt"
 
-        rescan
+        get_added_networks
+        echo "Networks added was ${networks_added[1]}"
+        for i in "${networks_added[@]}"; do 
+            echo "Network added: $i"
+        done
+
+        reconnect
     fi 
 }
 
@@ -172,8 +260,8 @@ else
     crontab=$(crontab -u $(whoami) -l)
 
     if [[ "$crontab" != *"$crontabLine"* ]]; then
-        echo "Adding to crontab"
         (crontab -u $(whoami) -l; echo "$crontabLine" ) | crontab -u $(whoami) -
+        echo "Adding to crontab"
     else 
         echo "Already installed"
     fi
